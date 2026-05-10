@@ -1,6 +1,7 @@
 """
 In-process WebSocket connection manager.
-Tracks connected players/spectators per match and broadcasts events.
+Tracks players/spectators per match, broadcasts events, persists snapshots,
+publishes to SSE for spectators, and fires hooks for the commentary pipeline.
 """
 import asyncio
 import json
@@ -13,11 +14,11 @@ from fastapi import WebSocket
 # {match_id: {ws: {user_id, player, role}}}
 _connections: dict[str, dict[WebSocket, dict]] = defaultdict(dict)
 
-# Snapshot buffers for the commentary agent
+# Last-seen snapshot per match per player, used to seed new connections
 # {match_id: {player: (code, ts_ms)}}
 _last_snapshot: dict[str, dict[str, tuple[str, int]]] = defaultdict(dict)
 
-# Callbacks registered by the commentary pipeline
+# Commentary pipeline hooks per match
 # {match_id: [callable(match_id, player, code, prev_code, ts_ms)]}
 _snapshot_hooks: dict[str, list[Callable]] = defaultdict(list)
 
@@ -35,7 +36,7 @@ async def connect(ws: WebSocket, match_id: str, user_id: str, player: str):
     role = "player" if player in ("a", "b") else "spectator"
     _connections[match_id][ws] = {"user_id": user_id, "player": player, "role": role}
 
-    # Send current snapshot state to newly connected client
+    # Replay current snapshot state to the new connection
     if match_id in _last_snapshot:
         for p, (code, ts) in _last_snapshot[match_id].items():
             try:
@@ -57,7 +58,7 @@ def disconnect(ws: WebSocket, match_id: str):
 
 async def broadcast(match_id: str, message: dict, exclude: WebSocket | None = None):
     dead = []
-    for ws, meta in list(_connections.get(match_id, {}).items()):
+    for ws, _meta in list(_connections.get(match_id, {}).items()):
         if ws is exclude:
             continue
         try:
@@ -68,31 +69,66 @@ async def broadcast(match_id: str, message: dict, exclude: WebSocket | None = No
         disconnect(ws, match_id)
 
 
+async def _persist_snapshot(match_id: str, player: str, code: str, ts_ms: int):
+    """Save snapshot to DB. Best-effort, errors logged but never raised."""
+    try:
+        from arena.db import get_pool_async
+        pool = await get_pool_async()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "insert into match_snapshots (match_id, player, code, ts_ms) values ($1, $2, $3, $4)",
+                match_id, player, code, ts_ms,
+            )
+    except Exception as e:
+        print(f"[ws] snapshot persist failed for {match_id}/{player}: {e}")
+
+
+async def _publish_to_sse(match_id: str, message: dict):
+    try:
+        from arena.sse import broadcaster as sse
+        await sse.publish(match_id, message)
+    except Exception as e:
+        print(f"[ws] sse publish failed: {e}")
+
+
 async def handle_code_update(
     ws: WebSocket, match_id: str, player: str, code: str
 ):
-    """Called when a player sends a code update. Broadcasts + fires snapshot hooks."""
+    """A player sent a code update. Broadcast, persist, hook agent."""
     ts_ms = int(time.time() * 1000)
     prev = _last_snapshot[match_id].get(player, ("", 0))
     prev_code = prev[0]
-
     _last_snapshot[match_id][player] = (code, ts_ms)
 
     msg = {"type": "code_snapshot", "player": player, "code": code, "ts_ms": ts_ms}
+
+    # 1. Broadcast to other WS clients in this match
     await broadcast(match_id, msg, exclude=ws)
 
-    # Fire snapshot hooks (commentary agent) asynchronously
+    # 2. Publish to SSE spectators
+    asyncio.create_task(_publish_to_sse(match_id, msg))
+
+    # 3. Persist to DB asynchronously (don't block the WS event loop)
+    asyncio.create_task(_persist_snapshot(match_id, player, code, ts_ms))
+
+    # 4. Fire commentary hooks
     for hook in _snapshot_hooks.get(match_id, []):
         asyncio.create_task(hook(match_id, player, code, prev_code, ts_ms))
 
 
 async def broadcast_commentary(match_id: str, text: str, ts_ms: int):
-    await broadcast(match_id, {"type": "commentary", "text": text, "ts_ms": ts_ms})
+    msg = {"type": "commentary", "text": text, "ts_ms": ts_ms}
+    await broadcast(match_id, msg)
+    await _publish_to_sse(match_id, msg)
 
 
 async def broadcast_run_result(match_id: str, player: str, result: dict):
-    await broadcast(match_id, {"type": "run_result", "player": player, **result})
+    msg = {"type": "run_result", "player": player, **result}
+    await broadcast(match_id, msg)
+    await _publish_to_sse(match_id, msg)
 
 
 async def broadcast_match_event(match_id: str, event_type: str, payload: dict):
-    await broadcast(match_id, {"type": "match_event", "event": event_type, **payload})
+    msg = {"type": "match_event", "event": event_type, **payload}
+    await broadcast(match_id, msg)
+    await _publish_to_sse(match_id, msg)

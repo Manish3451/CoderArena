@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from arena.db import DB
 from arena.auth.service import validate_session
 from arena.match import service as match_svc
+from arena.ws import manager as ws_manager
 
 router = APIRouter(prefix="/api/match", tags=["match"])
 
@@ -109,6 +110,12 @@ async def run_code(match_id: str, body: RunRequest, session: str = Cookie(None))
         except ValueError as e:
             raise HTTPException(400, str(e))
 
+    # Notify everyone of the run outcome (without leaking stderr details to opponent)
+    summary = {
+        "tests_passed": result["tests_passed"],
+        "tests_total": result["tests_total"],
+    }
+    await ws_manager.broadcast_run_result(match_id, match["player"], summary)
     return result
 
 
@@ -128,6 +135,18 @@ async def submit_code(match_id: str, body: RunRequest, session: str = Cookie(Non
             result = await match_svc.submit_code(conn, match_id, match["player"], body.code)
         except ValueError as e:
             raise HTTPException(400, str(e))
+
+    # If this submit won the match, notify everyone listening (opponent + spectators)
+    if result.get("all_passed"):
+        await ws_manager.broadcast_match_event(
+            match_id,
+            "match_finished",
+            {
+                "winner": match["player"],
+                "tests_passed": result["tests_passed"],
+                "tests_total": result["tests_total"],
+            },
+        )
 
     return result
 
