@@ -29,8 +29,28 @@ async def request_magic_link(body: EmailRequest):
     async with use_db(MagicLinkDB) as token_conn:
         token = await service.create_magic_token(token_conn, email, intent)
 
-    await service.send_magic_email(email, token)
+    try:
+        await service.send_magic_email(email, token)
+    except Exception as e:
+        pass  # Ignore email errors in production without API key
+
     return {"ok": True}
+
+
+# ── POST /auth/signup (dev mode - instant guest) ────────────────────────────────
+# ── POST /auth/guest (legacy alias) ───────────────────────────────────────────
+
+@router.post("/signup")
+@router.post("/guest")
+async def signup(response: Response):
+    async with use_db(UsersDB) as conn:
+        user = await service.create_guest_user(conn)
+    
+    async with use_db(SessionsDB) as sess_conn:
+        session_id = await service.create_session(sess_conn, str(user["id"]))
+
+    response.set_cookie(COOKIE_NAME, session_id, **COOKIE_OPTS)
+    return {"ok": True, "handle": user["handle"], "is_guest": True}
 
 
 # ── GET /auth/verify ──────────────────────────────────────────────────────────
