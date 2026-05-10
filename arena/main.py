@@ -24,7 +24,6 @@ async def lifespan(app: FastAPI):
         if pool:
             log.info("db connected")
 
-            # Seed problems
             async with pool.acquire() as conn:
                 from arena.match.service import seed_problems
                 await seed_problems(conn)
@@ -33,8 +32,6 @@ async def lifespan(app: FastAPI):
             log.warning("DATABASE_URL not set — using in-memory mode")
     except Exception as e:
         log.warning(f"DB connection failed, using in-memory mode: {e}")
-    else:
-        log.warning("DATABASE_URL not set — using in-memory mode")
 
     yield
 
@@ -51,7 +48,12 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.app_url, "http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=[
+        settings.app_url,
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "https://coder-arean-frontend.vercel.app",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
