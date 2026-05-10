@@ -46,14 +46,18 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "https://coder-arean-frontend.vercel.app",
+]
+
+if settings.app_url and settings.app_url not in ALLOWED_ORIGINS:
+    ALLOWED_ORIGINS.append(settings.app_url)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        settings.app_url,
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "https://coder-arean-frontend.vercel.app",
-    ],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
