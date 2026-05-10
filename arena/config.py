@@ -2,7 +2,7 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    openai_api_key: str
+    openai_api_key: str = ""
     moonshot_api_key: str = ""
     moonshot_base_url: str = "https://api.moonshot.cn/v1"
     environment: str = "development"
