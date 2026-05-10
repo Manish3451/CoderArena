@@ -1,0 +1,22 @@
+name: Deploy to Render
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: renderdeploy/action@v1
+        with:
+          render-cli-args: >-
+            web create
+            --name codearena
+            --branch main
+            --pythonVersion 3.11
+            --buildCommand "pip install -r requirements.txt"
+            --startCommand "uvicorn arena.main:app --host 0.0.0.0 --port $PORT"
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
