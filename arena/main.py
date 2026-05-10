@@ -19,28 +19,28 @@ async def lifespan(app: FastAPI):
     # Startup
     log.info("starting", environment=settings.environment)
 
-    # Skip DB connection attempt in production (cold start too slow)
-    if settings.environment == "production":
-        log.warning("DATABASE_URL not set — using in-memory mode")
+    if not settings.database_url:
+        log.error("DATABASE_URL is not set — auth and matches will not work")
     else:
         try:
             pool = await get_pool_async()
-            if pool:
-                log.info("db connected")
-                async with pool.acquire() as conn:
-                    from arena.match.service import seed_problems
-                    await seed_problems(conn)
-                    log.info("problems seeded")
-            else:
-                log.warning("DATABASE_URL not set — using in-memory mode")
+            log.info("db connected")
+            async with pool.acquire() as conn:
+                from arena.match.service import seed_problems
+                await seed_problems(conn)
+                log.info("problems seeded")
         except Exception as e:
-            log.warning(f"DB connection failed, using in-memory mode: {e}")
+            log.error(f"DB startup failed: {e}")
+            # Don't crash — let /health work so we can debug, but log loudly
 
     yield
 
     # Shutdown
-    await close_pool()
-    log.info("db pool closed")
+    try:
+        await close_pool()
+        log.info("db pool closed")
+    except Exception:
+        pass
 
 
 app = FastAPI(
@@ -61,6 +61,8 @@ if settings.app_url and settings.app_url not in ALLOWED_ORIGINS:
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
+    # Allow any Vercel preview URL on the same project (coder-arean-frontend-*.vercel.app)
+    allow_origin_regex=r"https://coder-arean-frontend.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

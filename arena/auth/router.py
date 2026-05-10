@@ -1,13 +1,34 @@
-from fastapi import APIRouter, Cookie, HTTPException, Response, Request
-from pydantic import BaseModel, EmailStr
+from fastapi import APIRouter, Cookie, HTTPException, Response
 
-from arena.db import UsersDB, MagicLinkDB, SessionsDB, use_db
+from pydantic import BaseModel
+
+from arena.config import settings
+from arena.db import DB
 from arena.auth import service
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 COOKIE_NAME = "session"
-COOKIE_OPTS = dict(httponly=True, secure=False, samesite="lax", max_age=60 * 60 * 24 * 30)
+
+# Cross-origin cookie config:
+# - In production (Vercel <-> Render are different domains): samesite="none", secure=True
+# - In local dev (same origin or localhost): samesite="lax", secure=False
+def _cookie_opts() -> dict:
+    if settings.environment == "production":
+        return dict(
+            httponly=True,
+            secure=True,         # required by browsers when SameSite=None
+            samesite="none",     # required for cross-origin cookies
+            max_age=60 * 60 * 24 * 30,
+            path="/",
+        )
+    return dict(
+        httponly=True,
+        secure=False,
+        samesite="lax",
+        max_age=60 * 60 * 24 * 30,
+        path="/",
+    )
 
 
 class EmailRequest(BaseModel):
@@ -18,72 +39,54 @@ class EmailRequest(BaseModel):
 
 @router.post("/request")
 async def request_magic_link(body: EmailRequest):
+    """Send a magic link. Always returns 200 (don't leak whether email exists)."""
     email = body.email.lower().strip()
     if not email or "@" not in email:
         raise HTTPException(422, "Invalid email")
 
-    async with use_db(UsersDB) as conn:
+    async with DB() as conn:
         existing = await conn.fetchrow("select id from users where email = $1", email)
         intent = "login" if existing else "signup"
-    
-    async with use_db(MagicLinkDB) as token_conn:
-        token = await service.create_magic_token(token_conn, email, intent)
+        token = await service.create_magic_token(conn, email, intent)
 
+    # If email send fails, surface a 500 so the user knows — silently swallowing
+    # was the previous bug that hid the real problem.
     try:
         await service.send_magic_email(email, token)
     except Exception as e:
-        pass  # Ignore email errors in production without API key
+        raise HTTPException(500, f"Email send failed: {e}")
 
     return {"ok": True}
-
-
-# ── POST /auth/signup (dev mode - instant guest) ────────────────────────────────
-# ── POST /auth/guest (legacy alias) ───────────────────────────────────────────
-
-@router.post("/signup")
-@router.post("/guest")
-async def signup(response: Response):
-    async with use_db(UsersDB) as conn:
-        user = await service.create_guest_user(conn)
-    
-    async with use_db(SessionsDB) as sess_conn:
-        session_id = await service.create_session(sess_conn, str(user["id"]))
-
-    response.set_cookie(COOKIE_NAME, session_id, **COOKIE_OPTS)
-    return {"ok": True, "handle": user["handle"], "is_guest": True}
 
 
 # ── GET /auth/verify ──────────────────────────────────────────────────────────
 
 @router.get("/verify")
 async def verify_magic_link(token: str):
-    async with use_db(MagicLinkDB) as conn:
-        data = await conn.fetchrow("select * from magic_link_tokens where token = $1", token)
-    
-    if not data or data.get("used_at") is not None:
+    async with DB() as conn:
+        data = await conn.fetchrow(
+            "select * from magic_link_tokens where token = $1", token
+        )
+    if not data or data["used_at"] is not None:
         raise HTTPException(400, "Link already used or invalid")
-    if data.get("expires_at") < service._now():
+    if data["expires_at"] < service._now():
         raise HTTPException(400, "Link expired")
 
-    return {"valid": True, "email": data.get("email"), "intent": data.get("intent")}
+    return {"valid": True, "email": data["email"], "intent": data["intent"]}
 
 
 # ── POST /auth/complete ───────────────────────────────────────────────────────
 
 @router.post("/complete")
 async def complete_magic_link(token: str, response: Response):
-    async with use_db(MagicLinkDB) as token_conn:
-        consumed = await service.consume_magic_token(token_conn, token)
+    async with DB() as conn:
+        consumed = await service.consume_magic_token(conn, token)
         if not consumed:
             raise HTTPException(400, "Link invalid, expired, or already used")
+        user = await service.get_or_create_user_by_email(conn, consumed["email"])
+        session_id = await service.create_session(conn, str(user["id"]))
 
-    async with use_db(UsersDB) as user_conn:
-        user = await service.get_or_create_user_by_email(user_conn, consumed["email"])
-    
-    async with use_db(SessionsDB) as sess_conn:
-        session_id = await service.create_session(sess_conn, str(user["id"]))
-
-    response.set_cookie(COOKIE_NAME, session_id, **COOKIE_OPTS)
+    response.set_cookie(COOKIE_NAME, session_id, **_cookie_opts())
     return {"ok": True, "handle": user["handle"], "is_guest": user["is_guest"]}
 
 
@@ -91,39 +94,12 @@ async def complete_magic_link(token: str, response: Response):
 
 @router.post("/guest")
 async def create_guest(response: Response):
-    async with use_db(UsersDB) as conn:
+    async with DB() as conn:
         user = await service.create_guest_user(conn)
-    
-    async with use_db(SessionsDB) as sess_conn:
-        session_id = await service.create_session(sess_conn, str(user["id"]))
+        session_id = await service.create_session(conn, str(user["id"]))
 
-    response.set_cookie(COOKIE_NAME, session_id, **COOKIE_OPTS)
+    response.set_cookie(COOKIE_NAME, session_id, **_cookie_opts())
     return {"ok": True, "handle": user["handle"], "is_guest": True}
-
-
-# ── POST /auth/claim ────────��─────────────────────────────────────────────────
-
-@router.post("/claim")
-async def claim_guest_account(body: EmailRequest, session: str = Cookie(None)):
-    if not session:
-        raise HTTPException(401, "Not authenticated")
-
-    async with use_db(SessionsDB) as sess_conn:
-        sess = await service.validate_session(sess_conn, session)
-        if not sess or not sess.get("is_guest"):
-            raise HTTPException(400, "Must be logged in as a guest to claim")
-
-    email = body.email.lower().strip()
-    async with use_db(UsersDB) as conn:
-        existing = await conn.fetchrow("select id from users where email = $1", email)
-        if existing:
-            raise HTTPException(400, "Email already in use")
-
-    async with use_db(MagicLinkDB) as token_conn:
-        token = await service.create_magic_token(token_conn, email, "signup")
-
-    await service.send_magic_email(email, token)
-    return {"ok": True}
 
 
 # ── POST /auth/logout ─────────────────────────────────────────────────────────
@@ -131,9 +107,9 @@ async def claim_guest_account(body: EmailRequest, session: str = Cookie(None)):
 @router.post("/logout")
 async def logout(response: Response, session: str = Cookie(None)):
     if session:
-        async with use_db(SessionsDB) as conn:
+        async with DB() as conn:
             await service.delete_session(conn, session)
-    response.delete_cookie(COOKIE_NAME)
+    response.delete_cookie(COOKIE_NAME, path="/")
     return {"ok": True}
 
 
@@ -143,24 +119,52 @@ async def logout(response: Response, session: str = Cookie(None)):
 async def me(session: str = Cookie(None)):
     if not session:
         raise HTTPException(401, "Not authenticated")
-    async with use_db(SessionsDB) as conn:
+    async with DB() as conn:
         sess = await service.validate_session(conn, session)
     if not sess:
         raise HTTPException(401, "Session expired")
     return {
-        "user_id": str(sess.get("user_id")),
-        "handle": sess.get("handle"),
-        "email": sess.get("email"),
-        "is_guest": sess.get("is_guest"),
+        "user_id": str(sess["user_id"]),
+        "handle": sess["handle"],
+        "email": sess["email"],
+        "is_guest": sess["is_guest"],
     }
 
+
+# ── GET /auth/token (for WS auth) ─────────────────────────────────────────────
 
 @router.get("/token")
 async def get_ws_token(session: str = Cookie(None)):
     if not session:
         raise HTTPException(401, "Not authenticated")
-    async with use_db(SessionsDB) as conn:
+    async with DB() as conn:
         sess = await service.validate_session(conn, session)
     if not sess:
         raise HTTPException(401, "Session expired")
     return {"token": session}
+
+
+# ── POST /auth/claim (guest -> permanent) ─────────────────────────────────────
+
+@router.post("/claim")
+async def claim_guest_account(body: EmailRequest, session: str = Cookie(None)):
+    if not session:
+        raise HTTPException(401, "Not authenticated")
+
+    async with DB() as conn:
+        sess = await service.validate_session(conn, session)
+        if not sess or not sess["is_guest"]:
+            raise HTTPException(400, "Must be logged in as a guest to claim")
+
+        email = body.email.lower().strip()
+        existing = await conn.fetchrow("select id from users where email = $1", email)
+        if existing:
+            raise HTTPException(400, "Email already in use")
+
+        token = await service.create_magic_token(conn, email, "signup")
+
+    try:
+        await service.send_magic_email(email, token)
+    except Exception as e:
+        raise HTTPException(500, f"Email send failed: {e}")
+    return {"ok": True}

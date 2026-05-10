@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: codearena
+    name: codearena-api
     runtime: python
     pythonVersion: "3.11"
     plan: free
@@ -9,6 +9,21 @@ services:
     envVars:
       - key: ENVIRONMENT
         value: "production"
-    envVars:
-      - key: PYTHON_VERSION
-        value: "3.11"
+      # The following must be set in the Render dashboard
+      # (Service > Environment > Add Environment Variable):
+      - key: DATABASE_URL
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: RESEND_FROM
+        sync: false
+      - key: APP_URL
+        sync: false
+      - key: API_URL
+        sync: false
+      - key: SECRET_KEY
+        generateValue: true
+      - key: MOONSHOT_API_KEY
+        sync: false

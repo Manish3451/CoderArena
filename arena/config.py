@@ -20,8 +20,12 @@ class Settings(BaseSettings):
     api_url: str = "http://localhost:8000"
     secret_key: str = "change-me-in-production-32-bytes-min"
 
+    # Direct (non-pooler) URL — used only by ad-hoc migration scripts
+    direct_database_url: str = ""
+
     class Config:
         env_file = ".env"
+        extra = "ignore"  # ignore unknown env vars instead of crashing
 
 
 settings = Settings()
