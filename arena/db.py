@@ -26,9 +26,18 @@ class InMemoryConn:
         q = query.lower()
         if self.table == "users":
             if "insert" in q and "returning" in q:
-                new_user = {"id": _get_id(), "handle": args[0] if args else "guest", "is_guest": True, "email": None}
+                new_user = {"id": _get_id(), "handle": args[0] if args else "guest", "is_guest": args[1] if len(args) > 1 else True, "email": args[2] if len(args) > 2 else None}
                 _in_memory["users"].add(new_user)
                 return new_user
+            if "update" in q:
+                for u in _in_memory["users"]:
+                    if u.get("id") == args[1]:
+                        u["handle"] = args[0]
+                        if len(args) > 2:
+                            u["email"] = args[2]
+                        if len(args) > 3:
+                            u["is_guest"] = args[3]
+                        return u
         elif self.table == "sessions":
             if "insert" in q:
                 _in_memory["sessions"][args[0]] = {"id": args[0], "user_id": args[1], "expires_at": args[2], "last_seen_at": args[2]}
@@ -59,11 +68,19 @@ class InMemoryConn:
         if self.table == "users":
             if "where handle" in q:
                 return {"id": _get_id(), "handle": args[0], "is_guest": True, "email": None}
+            if "where id" in q:
+                for u in _in_memory["users"]:
+                    if u.get("id") == args[0]:
+                        return u
+                return None
         elif self.table == "sessions":
             if "where" in q:
                 s = _in_memory["sessions"].get(args[0])
                 if s:
-                    return {"id": s["id"], "user_id": s["user_id"], "handle": "test", "is_guest": False}
+                    # Fetch user to get handle
+                    for u in _in_memory["users"]:
+                        if u.get("id") == s.get("user_id"):
+                            return {"id": s["id"], "user_id": s["user_id"], "handle": u.get("handle"), "is_guest": u.get("is_guest"), "email": u.get("email")}
                 return s
         elif self.table == "magic_link_tokens":
             if "where token" in q:
