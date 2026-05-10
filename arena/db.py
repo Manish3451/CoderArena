@@ -103,7 +103,11 @@ def get_pool():
 async def get_pool_async():
     global _pool
     if _pool is None and settings.database_url:
-        _pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=10, command_timeout=30)
+        try:
+            _pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=10, command_timeout=30)
+        except Exception as e:
+            print(f"DB connection failed: {e}")
+            return None
     return _pool
 
 

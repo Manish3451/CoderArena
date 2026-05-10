@@ -19,15 +19,20 @@ async def lifespan(app: FastAPI):
     # Startup
     log.info("starting", environment=settings.environment)
 
-    pool = await get_pool_async()
-    if pool:
-        log.info("db connected")
+    try:
+        pool = await get_pool_async()
+        if pool:
+            log.info("db connected")
 
-        # Seed problems
-        async with pool.acquire() as conn:
-            from arena.match.service import seed_problems
-            await seed_problems(conn)
-            log.info("problems seeded")
+            # Seed problems
+            async with pool.acquire() as conn:
+                from arena.match.service import seed_problems
+                await seed_problems(conn)
+                log.info("problems seeded")
+        else:
+            log.warning("DATABASE_URL not set — using in-memory mode")
+    except Exception as e:
+        log.warning(f"DB connection failed, using in-memory mode: {e}")
     else:
         log.warning("DATABASE_URL not set — using in-memory mode")
 
